@@ -4,6 +4,7 @@ import { useAppState } from './store';
 import { deriveStatus, helpLabels } from './status';
 import type { AppContext, AppState, HelpCategory, Mood, View } from './types';
 import { dayKey, formatDay, formatTime, greeting, initials, relative, uid } from './utils';
+import { sendEmergencyText } from './notify';
 
 const helpOptions: Array<{ value: HelpCategory; label: string }> = [
   { value: 'unwell', label: 'I feel unwell' },
@@ -165,7 +166,7 @@ function CircleView({ ctx, status }: { ctx: AppContext; status: ReturnType<typeo
 }
 
 function SettingsView({ ctx }: { ctx: AppContext }) {
-  const { state, update, reset, toast } = ctx;
+  const { state, update, toast } = ctx;
   const set = (patch: Partial<AppState['settings']>) => update((c) => ({ ...c, settings: { ...c.settings, ...patch } }));
   return <section className="page">
     <div className="page-head"><h1 className="page-title">Settings</h1><p className="page-sub">Make Daylight comfortable and clear for you.</p></div>
@@ -190,28 +191,37 @@ function SettingsView({ ctx }: { ctx: AppContext }) {
         <div className="field"><label htmlFor="ai-key">API key</label><input id="ai-key" type="password" value={state.settings.aiApiKey} onChange={(e) => set({ aiApiKey: e.target.value })} placeholder="sk-..." /><div className="field-hint">The key is saved in this browser's local storage. For production, use a secure backend proxy instead of exposing keys in the browser.</div></div>
       </>}
     </div>
-    <div className="card"><h2 className="card-title">Trusted circle</h2><p className="card-note">People who can be notified. In a real deployment this would send SMS/email/push.</p>
+    <div className="card"><h2 className="card-title">Trusted circle</h2><p className="card-note">People who can be notified. Emergency text uses your device's SMS/share with their phone numbers and optional location.</p>
       {state.contacts.map((contact, idx) => <div key={contact.id} className="editor-row"><div className="field" style={{ marginBottom: 0 }}><label>Name</label><input value={contact.name} onChange={(e) => update((c) => ({ ...c, contacts: c.contacts.map((x, i) => i === idx ? { ...x, name: e.target.value } : x) }))} /></div><div className="field" style={{ marginBottom: 0 }}><label>Phone</label><input value={contact.phone ?? ''} onChange={(e) => update((c) => ({ ...c, contacts: c.contacts.map((x, i) => i === idx ? { ...x, phone: e.target.value } : x) }))} /></div><button className="btn" onClick={() => update((c) => ({ ...c, contacts: c.contacts.filter((_, i) => i !== idx) }))}>Remove</button></div>)}
       <div className="actions" style={{ marginTop: 12 }}><button className="btn" onClick={() => update((c) => ({ ...c, contacts: [...c.contacts, { id: uid(), name: 'New person', relationship: 'Trusted person', notify: true }] }))}>Add person</button></div>
       <div className="toggle-row" style={{ marginTop: 14 }}><div><strong>Share with circle</strong><small>Allow your circle to see check-ins and health notes</small></div><button className="switch" role="switch" aria-checked={state.settings.shareWithCircle} onClick={() => set({ shareWithCircle: !state.settings.shareWithCircle })}><span className="sr-only">Toggle sharing</span></button></div>
     </div>
-    <div className="card"><h2 className="card-title">Demo controls</h2><p className="card-note">Use these to show how alerts work.</p><div className="demo-grid">
-      <button className="btn" onClick={() => update((c) => ({ ...c, checkIns: [{ id: uid(), at: new Date(Date.now() - 31 * 3600000).toISOString(), mood: 'okay' }, ...c.checkIns.slice(1)], events: [eventFor('system', 'Demo: check-in set to 31 hours ago'), ...c.events] }))}>Simulate missed check-in</button>
-      <button className="btn" onClick={() => update((c) => ({ ...c, helpRequests: [{ id: uid(), at: new Date().toISOString(), category: 'unwell', note: 'Demo alert', status: 'open' }, ...c.helpRequests], events: [eventFor('help', 'Demo: help requested'), ...c.events] }))}>Simulate help request</button>
-      <button className="btn btn-danger" onClick={() => { if (confirm('Reset all Daylight data on this device?')) { reset(); toast('Demo data reset.'); } }}>Reset demo data</button>
+    <div className="card"><h2 className="card-title">Data & actions</h2><p className="card-note">Your check-ins, health notes, and messages are stored on this device. You can export them for your records or care team.</p><div className="demo-grid">
+      <button className="btn" onClick={() => { const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `daylight-data-${dayKey()}.json`; a.click(); URL.revokeObjectURL(a.href); toast('Data exported.'); }}>Export my data</button>
+      <button className="btn btn-danger" onClick={() => { if (confirm('Delete all Daylight data on this device? This cannot be undone.')) { localStorage.removeItem('daylight.state.v1'); location.reload(); } }}>Delete my data</button>
     </div></div>
   </section>;
 }
 
 function HelpModal({ ctx, onClose }: { ctx: AppContext; onClose: () => void }) {
-  const { state, update, toast } = ctx; const [category, setCategory] = useState<HelpCategory>('unwell'); const [note, setNote] = useState('');
-  const notified = state.contacts.filter((c) => c.notify).map((c) => c.name);
+  const { state, update, toast } = ctx; const [category, setCategory] = useState<HelpCategory>('unwell'); const [note, setNote] = useState(''); const [sending, setSending] = useState(false);
+  const notified = state.contacts.filter((c) => c.notify && c.phone);
   return <div className="backdrop" role="dialog" aria-modal="true" aria-label="Request help"><div className="modal">
-    <h2>I need help</h2><p className="modal-lead">Choose what’s going on. Your trusted circle will be notified in this demo. If it’s an emergency, call {state.settings.emergencyNumber || '999'}.</p>
+    <h2>I need help</h2><p className="modal-lead">Choose what’s going on. Daylight will record it and prepare an emergency text to your trusted circle. If it’s an emergency, call {state.settings.emergencyNumber || '999'}.</p>
     <div className="category-grid">{helpOptions.map((opt) => <button key={opt.value} className="category" aria-pressed={category === opt.value} onClick={() => setCategory(opt.value)}>{opt.label}</button>)}</div>
     <div className="field"><label htmlFor="help-note">Anything you want to add (optional)</label><textarea id="help-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. I feel dizzy" /></div>
-    <p className="field-hint">Will notify: {notified.length ? notified.join(', ') : 'no one yet  -  add people in Settings'}.</p>
-    <div className="modal-actions"><button className="btn btn-danger" onClick={() => { update((c) => ({ ...c, helpRequests: [{ id: uid(), at: new Date().toISOString(), category, note: note.trim() || undefined, status: 'open' }, ...c.helpRequests], events: [eventFor('help', `Help requested: ${helpLabels[category]}`), ...c.events] })); onClose(); toast('Help request sent to your circle (demo).'); }}>Send help request</button><a className="btn" href={`tel:${(state.settings.emergencyNumber || '999').replace(/\s+/g, '')}`}>Call {state.settings.emergencyNumber || '999'}</a><button className="btn btn-ghost" onClick={onClose}>Cancel</button></div>
+    <p className="field-hint">Emergency text recipients: {notified.length ? notified.map((c) => c.name).join(', ') : 'no phone numbers yet - add them in Settings'}.</p>
+    <div className="modal-actions">
+      <button className="btn btn-danger" disabled={sending} onClick={async () => {
+        setSending(true);
+        const result = await sendEmergencyText(state, category, note);
+        update((c) => ({ ...c, helpRequests: [{ id: uid(), at: new Date().toISOString(), category, note: note.trim() || undefined, status: 'open' }, ...c.helpRequests], events: [eventFor('help', `Help requested: ${helpLabels[category]}${result.method === 'sms' ? ' (emergency text prepared)' : result.method === 'share' ? ' (shared)' : ''}`), ...c.events] }));
+        setSending(false); onClose();
+        toast(result.method === 'sms' ? 'Emergency text prepared on your device.' : result.method === 'share' ? 'Alert shared.' : result.method === 'clipboard' ? 'Alert copied. Paste it to your contacts.' : 'Help recorded. Add contact phone numbers to send texts.');
+      }}>{sending ? 'Preparing...' : 'Send emergency text'}</button>
+      <a className="btn" href={`tel:${(state.settings.emergencyNumber || '999').replace(/\s+/g, '')}`}>Call {state.settings.emergencyNumber || '999'}</a>
+      <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+    </div>
   </div></div>;
 }
 
@@ -219,7 +229,7 @@ function ConsentModal({ onAccept, onDecline }: { onAccept: () => void; onDecline
   return <div className="backdrop" role="dialog" aria-modal="true" aria-label="Sharing consent"><div className="modal">
     <h2>Before we share anything</h2><p className="modal-lead">Daylight works best when a trusted circle can see check-ins and health notes. You choose.</p>
     <div className="consent-block"><h3>What your circle can see</h3><ul><li>Check-ins and whether you asked for help</li><li>Health notes you record in chat (not medical advice)</li><li>Simple activity status (green / amber / red)</li></ul></div>
-    <div className="consent-block"><h3>What we don't do</h3><ul><li>No hidden tracking or selling data</li><li>No automatic emergency calls in this demo</li><li>No medical diagnosis  -  it records what you report</li></ul></div>
+    <div className="consent-block"><h3>What we don't do</h3><ul><li>No hidden tracking or selling data</li><li>No automatic emergency calls without you tapping</li><li>No medical diagnosis  -  it records what you report</li></ul></div>
     <p className="field-hint">You can change this any time in Settings. In an emergency, call your local emergency number.</p>
     <div className="modal-actions"><button className="btn btn-primary" onClick={onAccept}>I agree  -  share with my circle</button><button className="btn" onClick={onDecline}>Not now</button></div>
   </div></div>;

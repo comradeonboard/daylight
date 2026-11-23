@@ -69,6 +69,7 @@ function load(): AppState {
     return {
       version: 1,
       onboarded: saved.onboarded ?? base.onboarded,
+      account: saved.account ?? base.account,
       settings: { ...base.settings, ...(saved.settings ?? {}) },
       checkIns: Array.isArray(saved.checkIns) ? saved.checkIns : base.checkIns,
       helpRequests: Array.isArray(saved.helpRequests)

@@ -61,6 +61,13 @@ export interface EventItem {
 
 export type TextScale = 'normal' | 'large' | 'xlarge';
 
+export interface Account {
+  email: string;
+  name?: string;
+  provider: 'email' | 'google';
+  signedInAt: string;
+}
+
 export interface Settings {
   displayName: string;
   emergencyNumber: string;
@@ -84,6 +91,7 @@ export interface Settings {
 export interface AppState {
   version: 1;
   onboarded: boolean;
+  account?: Account;
   settings: Settings;
   checkIns: CheckIn[];
   helpRequests: HelpRequest[];

@@ -5,6 +5,7 @@ import { useAppState } from './store';
 import { deriveStatus, helpLabels } from './status';
 import type { AppContext, AppState, HelpCategory, Mood, View } from './types';
 import { dayKey, formatDay, formatTime, greeting, initials, relative, uid } from './utils';
+import { buildHealthReport, emailHealthReport } from './report';
 
 const helpOptions: Array<{ value: HelpCategory; label: string }> = [
   { value: 'unwell', label: 'I feel unwell' },
@@ -82,7 +83,7 @@ export default function App() {
         {state.onboarded && <nav className="segmented" aria-label="Views">{(['me', 'circle', 'settings'] as const).map((item) => <button key={item} aria-selected={view === item} onClick={() => setView(item)}>{item === 'me' ? 'My day' : item === 'circle' ? 'Circle' : 'Settings'}</button>)}</nav>}
       </header>
       <main id="main">
-        {!state.onboarded ? <Onboarding state={state} update={update} onDone={() => setConsentOpen(true)} /> : view === 'me' ? <MeView ctx={ctx} status={status} checkedInToday={checkedInToday} /> : view === 'circle' ? <CircleView ctx={ctx} status={status} /> : <SettingsView ctx={ctx} />}
+        {!state.account ? <LoginView state={state} update={update} /> : !state.onboarded ? <Onboarding state={state} update={update} onDone={() => setConsentOpen(true)} /> : view === 'me' ? <MeView ctx={ctx} status={status} checkedInToday={checkedInToday} /> : view === 'circle' ? <CircleView ctx={ctx} status={status} /> : <SettingsView ctx={ctx} />}
       </main>
       <footer className="footer">Daylight is a support tool, not a medical device or emergency service. In an emergency, call {state.settings.emergencyNumber || '999'}.</footer>
       {helpOpen && <HelpModal ctx={ctx} onClose={() => setHelpOpen(false)} />}
@@ -90,6 +91,32 @@ export default function App() {
       {toast && <div className="toast" role="status" aria-live="polite">{toast}</div>}
     </div>
   );
+}
+
+function LoginView({ state, update }: { state: AppState; update: (fn: (s: AppState) => AppState) => void }) {
+  const [email, setEmail] = useState(state.account?.email ?? '');
+  const [name, setName] = useState(state.settings.displayName === 'Alex' ? '' : state.settings.displayName);
+  const signInEmail = () => {
+    const value = email.trim().toLowerCase();
+    if (!value || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return;
+    update((c) => ({ ...c, account: { email: value, name: name.trim() || undefined, provider: 'email', signedInAt: new Date().toISOString() }, settings: { ...c.settings, displayName: name.trim() || c.settings.displayName } }));
+  };
+  const signInGoogle = () => {
+    // Best simple path: Google Identity setup can replace this with real OAuth token flow.
+    const value = email.trim().toLowerCase();
+    if (value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+      update((c) => ({ ...c, account: { email: value, name: name.trim() || undefined, provider: 'google', signedInAt: new Date().toISOString() }, settings: { ...c.settings, displayName: name.trim() || c.settings.displayName } }));
+      return;
+    }
+    alert('To use Google sign-in fully, connect Google Identity in app setup. For now, enter your Gmail address and continue.');
+  };
+  return <section className="page"><div className="page-head"><h1 className="page-title">Welcome to Daylight</h1><p className="page-sub">Sign in so your health report can be emailed when you request it.</p></div>
+    <div className="card"><h2 className="card-title">Sign in</h2><p className="card-note">Simple and safe. You can use email now. Google sign-in can be fully connected in setup.</p>
+      <div className="field"><label htmlFor="login-name">Your name</label><input id="login-name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" /></div>
+      <div className="field"><label htmlFor="login-email">Email address</label><input id="login-email" value={email} onChange={(e) => setEmail(e.target.value)} inputMode="email" autoComplete="email" placeholder="you@example.com" /></div>
+      <div className="actions"><button className="btn btn-primary" onClick={signInEmail}>Continue with email</button><button className="btn" onClick={signInGoogle}>Continue with Google</button></div>
+      <p className="field-hint" style={{ marginTop: 12 }}>We skipped Apple sign-in to keep setup simple. For full Google/automatic account login across devices, connect Firebase/Supabase Auth later.</p>
+    </div></section>;
 }
 
 function Onboarding({ state, update, onDone }: { state: AppState; update: (fn: (s: AppState) => AppState) => void; onDone: () => void }) {
@@ -210,6 +237,14 @@ function SettingsView({ ctx }: { ctx: AppContext }) {
       {state.contacts.map((contact, idx) => <div key={contact.id} className="editor-row"><div className="field" style={{ marginBottom: 0 }}><label>Name</label><input value={contact.name} onChange={(e) => update((c) => ({ ...c, contacts: c.contacts.map((x, i) => i === idx ? { ...x, name: e.target.value } : x) }))} /></div><div className="field" style={{ marginBottom: 0 }}><label>Phone</label><input value={contact.phone ?? ''} onChange={(e) => update((c) => ({ ...c, contacts: c.contacts.map((x, i) => i === idx ? { ...x, phone: e.target.value } : x) }))} /></div><button className="btn" onClick={() => update((c) => ({ ...c, contacts: c.contacts.filter((_, i) => i !== idx) }))}>Remove</button></div>)}
       <div className="actions" style={{ marginTop: 12 }}><button className="btn" onClick={() => update((c) => ({ ...c, contacts: [...c.contacts, { id: uid(), name: 'New person', relationship: 'Trusted person', notify: true }] }))}>Add person</button></div>
       <div className="toggle-row" style={{ marginTop: 14 }}><div><strong>Share with circle</strong><small>Allow your circle to see check-ins and health notes</small></div><button className="switch" role="switch" aria-checked={state.settings.shareWithCircle} onClick={() => set({ shareWithCircle: !state.settings.shareWithCircle })}><span className="sr-only">Toggle sharing</span></button></div>
+    </div>
+    <div className="card"><h2 className="card-title">Account & health report</h2><p className="card-note">Signed in as {state.account?.email || 'no email yet'}. You can email a health report when you request it.</p>
+      <div className="field"><label htmlFor="account-email">Account email</label><input id="account-email" value={state.account?.email || ''} onChange={(e) => update((c) => ({ ...c, account: { email: e.target.value.trim().toLowerCase(), name: c.account?.name || c.settings.displayName, provider: c.account?.provider || 'email', signedInAt: c.account?.signedInAt || new Date().toISOString() } }))} inputMode="email" autoComplete="email" /></div>
+      <div className="demo-grid">
+        <button className="btn btn-primary" onClick={async () => { await emailHealthReport(state); toast('Health report ready to send.'); }}>Email health report</button>
+        <button className="btn" onClick={async () => { const report = buildHealthReport(state); try { await navigator.clipboard.writeText(report); toast('Health report copied.'); } catch { toast('Could not copy report.'); } }}>Copy health report</button>
+        <button className="btn" onClick={() => { update((c) => ({ ...c, account: undefined })); toast('Signed out.'); }}>Sign out</button>
+      </div>
     </div>
     <div className="card"><h2 className="card-title">Data & actions</h2><p className="card-note">Your check-ins, health notes, and messages are stored on this device. You can export them for your records or care team.</p><div className="demo-grid">
       <button className="btn" onClick={() => { const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `daylight-data-${dayKey()}.json`; a.click(); URL.revokeObjectURL(a.href); toast('Data exported.'); }}>Export my data</button>

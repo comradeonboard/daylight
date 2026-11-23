@@ -56,7 +56,7 @@ export function deriveStatus(state: AppState, now: Date = new Date()): StatusInf
     return {
       level: 'red',
       title: 'No check-in for a while',
-      detail: `Last heard from ${formatDay(last.at, now)} at ${formatTime(last.at)} — ${wholeHours(hours)} ago. Consider calling them.`,
+      detail: `Last heard from ${formatDay(last.at, now)} at ${formatTime(last.at)}  -  ${wholeHours(hours)} ago. Consider calling them.`,
       hoursSince: hours,
       since: last.at,
     };
@@ -66,7 +66,7 @@ export function deriveStatus(state: AppState, now: Date = new Date()): StatusInf
     return {
       level: 'amber',
       title: 'Check-in is overdue',
-      detail: `Last check-in was ${formatDay(last.at, now)} at ${formatTime(last.at)} — ${wholeHours(hours)} ago.`,
+      detail: `Last check-in was ${formatDay(last.at, now)} at ${formatTime(last.at)}  -  ${wholeHours(hours)} ago.`,
       hoursSince: hours,
       since: last.at,
     };
@@ -85,7 +85,7 @@ export function deriveStatus(state: AppState, now: Date = new Date()): StatusInf
   return {
     level: 'green',
     title: 'Checked in',
-    detail: `Last check-in ${relative(last.at, now)} — ${formatTime(last.at)} ${formatDay(last.at, now)}.`,
+    detail: `Last check-in ${relative(last.at, now)}  -  ${formatTime(last.at)} ${formatDay(last.at, now)}.`,
     hoursSince: hours,
     since: last.at,
   };

@@ -57,7 +57,7 @@ export function assistantReply(input: string, state: AppState): { text: string; 
   if (/(medic|pill|tablet|insulin|injection|dose|prescription)/.test(question)) {
     const summary = health?.summary ?? 'Medication mentioned';
     return {
-      text: `I've noted that for you: ${summary}. I can't give medical advice or change doses — please follow your prescription or call your GP/pharmacist if you're unsure.`,
+      text: `I've noted that for you: ${summary}. I can't give medical advice or change doses  -  please follow your prescription or call your GP/pharmacist if you're unsure.`,
       health: { ...health, id: uid(), at: new Date().toISOString(), source: 'chat', summary, note: input.slice(0, 240) },
     };
   }

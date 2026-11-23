@@ -79,39 +79,55 @@ User context:
 When you learn health info, naturally reflect it back. Keep replies under 120 words.`;
 }
 
-export async function generateAssistantReply(input: string, state: AppState): Promise<{ text: string; health?: Partial<HealthEntry> }> {
-  const health = extractHealth(input);
-  const urgent = urgentPattern.test(input);
-  if (urgent) return localAssistantReply(input, state);
-
+async function callRemoteAI(state: AppState, prompt: string): Promise<string | null> {
   const s = state.settings;
-  const canUseRemote = s.aiEnabled && s.aiMode === 'openai' && s.aiApiKey.trim() && s.aiEndpoint.trim();
-  if (!canUseRemote) return localAssistantReply(input, state);
+  if (!s.aiEnabled || !s.aiApiKey.trim()) return null;
+  const recent = state.messages.slice(-12).map((m) => ({ role: m.role === 'assistant' || m.from === 'Daylight' ? 'assistant' : 'user', content: m.text }));
 
-  try {
-    const recent = state.messages.slice(-12).map((m) => ({ role: m.role === 'assistant' || m.from === 'Daylight' ? 'assistant' : 'user', content: m.text }));
-    const res = await fetch(s.aiEndpoint, {
+  if (s.aiMode === 'gemini') {
+    const model = s.aiModel || 'gemini-1.5-flash';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(s.aiApiKey.trim())}`;
+    const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.aiApiKey.trim()}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: s.aiModel || 'gpt-4o-mini',
-        temperature: 0.4,
-        messages: [{ role: 'system', content: buildSystemPrompt(state) }, ...recent, { role: 'user', content: input }],
+        systemInstruction: { parts: [{ text: buildSystemPrompt(state) }] },
+        contents: [...recent.map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })), { role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.4, maxOutputTokens: 300 },
       }),
     });
     if (!res.ok) throw new Error(`AI ${res.status}`);
     const data = await res.json();
-    const text = data?.choices?.[0]?.message?.content?.trim();
-    if (!text) throw new Error('Empty AI response');
-    return { text, health: health ?? undefined };
-  } catch {
-    const local = localAssistantReply(input, state);
-    return { text: local.text, health: local.health ?? health ?? undefined };
+    return data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('').trim() || null;
   }
+
+  if (s.aiMode === 'openai' && s.aiEndpoint.trim()) {
+    const res = await fetch(s.aiEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.aiApiKey.trim()}` },
+      body: JSON.stringify({ model: s.aiModel || 'gpt-4o-mini', temperature: 0.4, messages: [{ role: 'system', content: buildSystemPrompt(state) }, ...recent, { role: 'user', content: prompt }] }),
+    });
+    if (!res.ok) throw new Error(`AI ${res.status}`);
+    const data = await res.json();
+    return data?.choices?.[0]?.message?.content?.trim() || null;
+  }
+  return null;
+}
+
+export async function generateAssistantReply(input: string, state: AppState): Promise<{ text: string; health?: Partial<HealthEntry> }> {
+  const health = extractHealth(input);
+  if (urgentPattern.test(input)) return localAssistantReply(input, state);
+  try {
+    const text = await callRemoteAI(state, input);
+    if (text) return { text, health: health ?? undefined };
+  } catch {
+    // fall back to local
+  }
+  const local = localAssistantReply(input, state);
+  return { text: local.text, health: local.health ?? health ?? undefined };
 }
 
 export async function generateProactiveMessage(state: AppState): Promise<string> {
-  const s = state.settings;
   const name = state.settings.displayName.split(' ')[0] || 'there';
   const last = state.messages[state.messages.length - 1];
   const recentHealth = state.healthEntries[0]?.summary;
@@ -120,21 +136,10 @@ export async function generateProactiveMessage(state: AppState): Promise<string>
     if (recentHealth) return `Hi ${name}, thanks for talking with me earlier. How are you feeling now after ${recentHealth}?`;
     return `Hi ${name}, I'm here with you. How are you feeling right now?`;
   };
-
-  const canUseRemote = s.aiEnabled && s.aiMode === 'openai' && s.aiApiKey.trim() && s.aiEndpoint.trim();
-  if (!canUseRemote) return localFallback();
-
   try {
-    const recent = state.messages.slice(-8).map((m) => ({ role: m.role === 'assistant' || m.from === 'Daylight' ? 'assistant' : 'user', content: m.text }));
     const prompt = `Start a gentle proactive check-in with ${name}. ${recentHealth ? `Recent note: ${recentHealth}.` : ''} ${last ? `Last message was: "${last.text.slice(0, 120)}"` : 'No recent conversation.'} Ask one warm question.`;
-    const res = await fetch(s.aiEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.aiApiKey.trim()}` },
-      body: JSON.stringify({ model: s.aiModel || 'gpt-4o-mini', temperature: 0.5, messages: [{ role: 'system', content: buildSystemPrompt(state) }, ...recent, { role: 'user', content: prompt }] }),
-    });
-    if (!res.ok) throw new Error('bad');
-    const data = await res.json();
-    return data?.choices?.[0]?.message?.content?.trim() || localFallback();
+    const text = await callRemoteAI(state, prompt);
+    return text || localFallback();
   } catch {
     return localFallback();
   }

@@ -28,7 +28,7 @@ export function defaultState(): AppState {
       aiMode: 'local',
       aiEndpoint: 'https://api.openai.com/v1/chat/completions',
       aiApiKey: '',
-      aiModel: 'gpt-4o-mini',
+      aiModel: 'gemini-1.5-flash',
       proactiveChat: true,
     },
     checkIns: [{ id: uid(), at: lastCheckIn, mood: 'okay' }],

@@ -77,7 +77,7 @@ export interface Settings {
   speakReplies: boolean;
   healthConditions: string[];
   aiEnabled: boolean;
-  aiMode: 'local' | 'openai';
+  aiMode: 'local' | 'openai' | 'gemini';
   aiEndpoint: string;
   aiApiKey: string;
   aiModel: string;

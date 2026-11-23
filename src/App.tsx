@@ -17,7 +17,14 @@ const eventFor = (kind: AppState['events'][number]['kind'], text: string) => ({ 
 function speak(text: string) {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
   window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text); u.rate = 0.95; window.speechSynthesis.speak(u);
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1;
+  u.pitch = 1;
+  u.volume = 1;
+  const voices = window.speechSynthesis.getVoices();
+  const preferred = voices.find((v) => /en-GB|en_GB|Google UK English Female|Samantha|Natural/i.test(`${v.name} ${v.lang}`)) || voices.find((v) => v.lang?.toLowerCase().startsWith('en'));
+  if (preferred) u.voice = preferred;
+  window.speechSynthesis.speak(u);
 }
 
 export default function App() {
@@ -184,11 +191,15 @@ function SettingsView({ ctx }: { ctx: AppContext }) {
     <div className="card"><h2 className="card-title">AI companion</h2><p className="card-note">Daylight can talk automatically and check in. For real intelligent AI, use OpenAI-compatible mode and add your own API key (stored on this device only).</p>
       <div className="toggle-row"><div><strong>Enable AI companion</strong><small>Allow Daylight to respond and check in</small></div><button className="switch" role="switch" aria-checked={state.settings.aiEnabled} onClick={() => set({ aiEnabled: !state.settings.aiEnabled })}><span className="sr-only">Toggle AI</span></button></div>
       <div className="toggle-row"><div><strong>Automatic check-ins</strong><small>Daylight messages you if it has been quiet for a while</small></div><button className="switch" role="switch" aria-checked={state.settings.proactiveChat} onClick={() => set({ proactiveChat: !state.settings.proactiveChat })}><span className="sr-only">Toggle proactive chat</span></button></div>
-      <div className="field"><label htmlFor="ai-mode">AI mode</label><select id="ai-mode" className="ask-input" value={state.settings.aiMode} onChange={(e) => set({ aiMode: e.target.value as any })}><option value="local">Built-in on-device assistant (no key)</option><option value="openai">OpenAI-compatible API (smarter)</option></select></div>
+      <div className="field"><label htmlFor="ai-mode">AI mode</label><select id="ai-mode" className="ask-input" value={state.settings.aiMode} onChange={(e) => { const mode = e.target.value as any; set({ aiMode: mode, aiModel: mode === 'gemini' ? 'gemini-1.5-flash' : mode === 'openai' ? 'gpt-4o-mini' : state.settings.aiModel }); }}><option value="local">Built-in on-device assistant (no key)</option><option value="gemini">Gemini API (recommended for natural chat)</option><option value="openai">OpenAI-compatible API</option></select></div>
+      {state.settings.aiMode === 'gemini' && <>
+        <div className="field"><label htmlFor="ai-model">Gemini model</label><input id="ai-model" value={state.settings.aiModel} onChange={(e) => set({ aiModel: e.target.value })} placeholder="gemini-1.5-flash" /></div>
+        <div className="field"><label htmlFor="ai-key">Gemini API key</label><input id="ai-key" type="password" value={state.settings.aiApiKey} onChange={(e) => set({ aiApiKey: e.target.value })} placeholder="AIza..." /><div className="field-hint">Get a key from Google AI Studio. The key is stored only in this browser. For production, use a secure backend proxy.</div></div>
+      </>}
       {state.settings.aiMode === 'openai' && <>
         <div className="field"><label htmlFor="ai-endpoint">API endpoint</label><input id="ai-endpoint" value={state.settings.aiEndpoint} onChange={(e) => set({ aiEndpoint: e.target.value })} placeholder="https://api.openai.com/v1/chat/completions" /></div>
         <div className="field"><label htmlFor="ai-model">Model</label><input id="ai-model" value={state.settings.aiModel} onChange={(e) => set({ aiModel: e.target.value })} placeholder="gpt-4o-mini" /></div>
-        <div className="field"><label htmlFor="ai-key">API key</label><input id="ai-key" type="password" value={state.settings.aiApiKey} onChange={(e) => set({ aiApiKey: e.target.value })} placeholder="sk-..." /><div className="field-hint">The key is saved in this browser's local storage. For production, use a secure backend proxy instead of exposing keys in the browser.</div></div>
+        <div className="field"><label htmlFor="ai-key">API key</label><input id="ai-key" type="password" value={state.settings.aiApiKey} onChange={(e) => set({ aiApiKey: e.target.value })} placeholder="sk-..." /><div className="field-hint">Stored only in this browser. For production, use a secure backend proxy.</div></div>
       </>}
     </div>
     <div className="card"><h2 className="card-title">Trusted circle</h2><p className="card-note">People who can be notified. Emergency text uses your device's SMS/share with their phone numbers and optional location.</p>

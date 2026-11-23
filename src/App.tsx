@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { assistantReply } from './assistant';
+import { generateAssistantReply, generateProactiveMessage } from './assistant';
 import { useAppState } from './store';
 import { deriveStatus, helpLabels } from './status';
 import type { AppContext, AppState, HelpCategory, Mood, View } from './types';
@@ -25,9 +25,41 @@ export default function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [consentOpen, setConsentOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const proactiveRef = useRef(false);
   useEffect(() => { if (state.onboarded && !state.settings.consentGiven) setConsentOpen(true); }, [state.onboarded, state.settings.consentGiven]);
   useEffect(() => { if (!toast) return; const t = window.setTimeout(() => setToast(null), 2800); return () => window.clearTimeout(t); }, [toast]);
   useEffect(() => { document.documentElement.style.fontSize = state.settings.textScale === 'xlarge' ? '23px' : state.settings.textScale === 'large' ? '20px' : '17px'; document.body.classList.toggle('contrast', state.settings.highContrast); }, [state.settings.textScale, state.settings.highContrast]);
+
+  useEffect(() => {
+    if (!state.onboarded || !state.settings.aiEnabled || !state.settings.proactiveChat) return;
+    const tick = async () => {
+      if (proactiveRef.current) return;
+      const now = Date.now();
+      const lastMsg = state.messages[state.messages.length - 1];
+      const lastAt = lastMsg ? new Date(lastMsg.at).getTime() : 0;
+      const lastProactive = state.settings.lastProactiveAt ? new Date(state.settings.lastProactiveAt).getTime() : 0;
+      const quietMs = 45 * 60 * 1000;
+      const due = (!lastAt && now - lastProactive > quietMs) || (lastAt && now - Math.max(lastAt, lastProactive) > quietMs);
+      const recentAssistant = lastMsg?.from === 'Daylight' && now - lastAt < quietMs;
+      if (!due || recentAssistant) return;
+      proactiveRef.current = true;
+      try {
+        const text = await generateProactiveMessage(state);
+        const at = new Date().toISOString();
+        update((c) => ({
+          ...c,
+          settings: { ...c.settings, lastProactiveAt: at },
+          messages: [...c.messages, { id: uid(), at, from: 'Daylight', role: 'assistant' as const, text }].slice(-80),
+          events: [eventFor('system', 'Daylight sent a proactive check-in'), ...c.events].slice(0, 200),
+        }));
+        if (state.settings.speakReplies) speak(text);
+      } finally { proactiveRef.current = false; }
+    };
+    tick();
+    const id = window.setInterval(tick, 60_000);
+    return () => window.clearInterval(id);
+  }, [state.onboarded, state.settings.aiEnabled, state.settings.proactiveChat, state.settings.lastProactiveAt, state.settings.speakReplies, state.messages, state.healthEntries, state.checkIns, state.settings.displayName, state.settings.healthConditions, state.settings.aiMode, state.settings.aiEndpoint, state.settings.aiApiKey, state.settings.aiModel]);
+
   const now = new Date();
   const status = useMemo(() => deriveStatus(state, now), [state, now]);
   const checkedInToday = state.checkIns.some((c) => dayKey(new Date(c.at)) === dayKey(now));
@@ -81,20 +113,27 @@ function MeView({ ctx, status, checkedInToday }: { ctx: AppContext; status: Retu
 }
 
 function AssistantCard({ ctx }: { ctx: AppContext }) {
-  const { state, update } = ctx; const [draft, setDraft] = useState(''); const [listening, setListening] = useState(false);
+  const { state, update } = ctx; const [draft, setDraft] = useState(''); const [listening, setListening] = useState(false); const [thinking, setThinking] = useState(false);
   const logRef = useRef<HTMLDivElement | null>(null); const recRef = useRef<any>(null);
-  useEffect(() => { logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: 'smooth' }); }, [state.messages.length]);
-  const send = (text: string) => {
-    const content = text.trim(); if (!content) return;
-    const at = new Date().toISOString(); const userMsg = { id: uid(), at, from: 'You', text: content };
-    const reply = assistantReply(content, state); const botMsg = { id: uid(), at: new Date().toISOString(), from: 'Daylight', text: reply.text };
-    update((c) => {
-      const events = [...c.events]; const healthEntries = [...c.healthEntries];
-      if (reply.health) { const entry = { id: uid(), at: new Date().toISOString(), source: 'chat' as const, summary: reply.health.summary || content.slice(0, 80), ...reply.health }; healthEntries.unshift(entry as any); events.unshift(eventFor('health', `Health note: ${entry.summary}`)); }
-      return { ...c, messages: [...c.messages, userMsg, botMsg].slice(-80), healthEntries: healthEntries.slice(0, 100), events: events.slice(0, 200) };
-    });
-    setDraft(''); if (state.settings.speakReplies) speak(reply.text);
+  useEffect(() => { logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: 'smooth' }); }, [state.messages.length, thinking]);
+
+  const send = async (text: string) => {
+    const content = text.trim(); if (!content || thinking) return;
+    const at = new Date().toISOString(); const userMsg = { id: uid(), at, from: 'You', role: 'user' as const, text: content };
+    update((c) => ({ ...c, messages: [...c.messages, userMsg].slice(-80) }));
+    setDraft(''); setThinking(true);
+    try {
+      const reply = await generateAssistantReply(content, state);
+      const botMsg = { id: uid(), at: new Date().toISOString(), from: 'Daylight', role: 'assistant' as const, text: reply.text };
+      update((c) => {
+        const events = [...c.events]; const healthEntries = [...c.healthEntries];
+        if (reply.health) { const entry = { id: uid(), at: new Date().toISOString(), source: 'chat' as const, summary: reply.health.summary || content.slice(0, 80), ...reply.health }; healthEntries.unshift(entry as any); events.unshift(eventFor('health', `Health note: ${entry.summary}`)); }
+        return { ...c, messages: [...c.messages, botMsg].slice(-80), healthEntries: healthEntries.slice(0, 100), events: events.slice(0, 200) };
+      });
+      if (state.settings.speakReplies) speak(reply.text);
+    } finally { setThinking(false); }
   };
+
   const toggleVoice = () => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) { ctx.toast('Voice input is not available in this browser. You can still type.'); return; }
@@ -104,11 +143,12 @@ function AssistantCard({ ctx }: { ctx: AppContext }) {
     rec.onerror = () => { setListening(false); ctx.toast('Could not hear that clearly. Please try again or type.'); };
     rec.onend = () => setListening(false); recRef.current = rec; rec.start(); setListening(true);
   };
+
   const quick = ['How am I doing today?', 'I feel a bit tired', 'I took my medication', 'Who can I call?'];
-  return <div className="card"><h2 className="card-title">Chat with Daylight</h2><p className="card-note">Tell me how you're feeling, by typing or voice. I can record health notes and help you get support. I'm not a medical service.</p>
-    <div className="assistant-log" ref={logRef} aria-live="polite">{state.messages.length === 0 && <div className="bubble bot">Hi {state.settings.displayName.split(' ')[0] || 'there'}. How are you feeling today?</div>}{state.messages.map((msg) => <div key={msg.id} className={`bubble ${msg.from === 'You' ? 'user' : 'bot'}`}>{msg.text}</div>)}</div>
+  return <div className="card"><h2 className="card-title">Chat with Daylight</h2><p className="card-note">Daylight can chat with you by text or voice, check in proactively, and record health notes you report. It is not a medical service.</p>
+    <div className="assistant-log" ref={logRef} aria-live="polite">{state.messages.length === 0 && <div className="bubble bot">Hi {state.settings.displayName.split(' ')[0] || 'there'}. How are you feeling today?</div>}{state.messages.map((msg) => <div key={msg.id} className={`bubble ${msg.from === 'You' ? 'user' : 'bot'}`}>{msg.text}</div>)}{thinking && <div className="bubble bot">Daylight is thinking...</div>}</div>
     <div className="chips" aria-label="Suggested messages">{quick.map((q) => <button key={q} className="chip" onClick={() => send(q)}>{q}</button>)}</div>
-    <div className="ask-row"><input className="ask-input" aria-label="Message Daylight" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') send(draft); }} placeholder="Type or use voice..." /><button className="btn" onClick={toggleVoice} aria-pressed={listening}>{listening ? 'Listening…' : '🎤 Voice'}</button><button className="ask-send" onClick={() => send(draft)}>Send</button></div>
+    <div className="ask-row"><input className="ask-input" aria-label="Message Daylight" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') send(draft); }} placeholder="Type or use voice..." /><button className="btn" onClick={toggleVoice} aria-pressed={listening}>{listening ? 'Listening…' : '🎤 Voice'}</button><button className="ask-send" onClick={() => send(draft)} disabled={thinking}>{thinking ? '...' : 'Send'}</button></div>
   </div>;
 }
 
@@ -139,6 +179,16 @@ function SettingsView({ ctx }: { ctx: AppContext }) {
       <div className="field"><label htmlFor="name">Name</label><input id="name" value={state.settings.displayName} onChange={(e) => set({ displayName: e.target.value })} /></div>
       <div className="field"><label htmlFor="conditions">Health conditions (comma separated)</label><input id="conditions" value={state.settings.healthConditions.join(', ')} onChange={(e) => set({ healthConditions: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) })} /><div className="field-hint">Used to make check-ins more relevant. Not a diagnosis.</div></div>
       <div className="field"><label htmlFor="emergency">Emergency number</label><input id="emergency" value={state.settings.emergencyNumber} onChange={(e) => set({ emergencyNumber: e.target.value })} inputMode="tel" /></div>
+    </div>
+    <div className="card"><h2 className="card-title">AI companion</h2><p className="card-note">Daylight can talk automatically and check in. For real intelligent AI, use OpenAI-compatible mode and add your own API key (stored on this device only).</p>
+      <div className="toggle-row"><div><strong>Enable AI companion</strong><small>Allow Daylight to respond and check in</small></div><button className="switch" role="switch" aria-checked={state.settings.aiEnabled} onClick={() => set({ aiEnabled: !state.settings.aiEnabled })}><span className="sr-only">Toggle AI</span></button></div>
+      <div className="toggle-row"><div><strong>Automatic check-ins</strong><small>Daylight messages you if it has been quiet for a while</small></div><button className="switch" role="switch" aria-checked={state.settings.proactiveChat} onClick={() => set({ proactiveChat: !state.settings.proactiveChat })}><span className="sr-only">Toggle proactive chat</span></button></div>
+      <div className="field"><label htmlFor="ai-mode">AI mode</label><select id="ai-mode" className="ask-input" value={state.settings.aiMode} onChange={(e) => set({ aiMode: e.target.value as any })}><option value="local">Built-in on-device assistant (no key)</option><option value="openai">OpenAI-compatible API (smarter)</option></select></div>
+      {state.settings.aiMode === 'openai' && <>
+        <div className="field"><label htmlFor="ai-endpoint">API endpoint</label><input id="ai-endpoint" value={state.settings.aiEndpoint} onChange={(e) => set({ aiEndpoint: e.target.value })} placeholder="https://api.openai.com/v1/chat/completions" /></div>
+        <div className="field"><label htmlFor="ai-model">Model</label><input id="ai-model" value={state.settings.aiModel} onChange={(e) => set({ aiModel: e.target.value })} placeholder="gpt-4o-mini" /></div>
+        <div className="field"><label htmlFor="ai-key">API key</label><input id="ai-key" type="password" value={state.settings.aiApiKey} onChange={(e) => set({ aiApiKey: e.target.value })} placeholder="sk-..." /><div className="field-hint">The key is saved in this browser's local storage. For production, use a secure backend proxy instead of exposing keys in the browser.</div></div>
+      </>}
     </div>
     <div className="card"><h2 className="card-title">Trusted circle</h2><p className="card-note">People who can be notified. In a real deployment this would send SMS/email/push.</p>
       {state.contacts.map((contact, idx) => <div key={contact.id} className="editor-row"><div className="field" style={{ marginBottom: 0 }}><label>Name</label><input value={contact.name} onChange={(e) => update((c) => ({ ...c, contacts: c.contacts.map((x, i) => i === idx ? { ...x, name: e.target.value } : x) }))} /></div><div className="field" style={{ marginBottom: 0 }}><label>Phone</label><input value={contact.phone ?? ''} onChange={(e) => update((c) => ({ ...c, contacts: c.contacts.map((x, i) => i === idx ? { ...x, phone: e.target.value } : x) }))} /></div><button className="btn" onClick={() => update((c) => ({ ...c, contacts: c.contacts.filter((_, i) => i !== idx) }))}>Remove</button></div>)}

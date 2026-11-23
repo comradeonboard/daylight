@@ -48,6 +48,7 @@ export interface Message {
   id: string;
   at: string;
   from: string;
+  role?: 'user' | 'assistant';
   text: string;
 }
 
@@ -75,6 +76,13 @@ export interface Settings {
   simpleView: boolean;
   speakReplies: boolean;
   healthConditions: string[];
+  aiEnabled: boolean;
+  aiMode: 'local' | 'openai';
+  aiEndpoint: string;
+  aiApiKey: string;
+  aiModel: string;
+  proactiveChat: boolean;
+  lastProactiveAt?: string;
 }
 
 export interface AppState {

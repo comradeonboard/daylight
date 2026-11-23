@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { generateAssistantReply, generateProactiveMessage, parseAssistantActions } from './assistant';
+import { emailSignIn, emailSignUp, firebaseEnabled, googleSignIn, logOut, resetPassword, watchAuth } from './auth';
 import { sendEmergencyText } from './notify';
+import { buildHealthReport, emailHealthReport } from './report';
 import { useAppState } from './store';
 import { deriveStatus, helpLabels } from './status';
+import { loadCloudState, saveCloudState } from './sync';
 import type { AppContext, AppState, HelpCategory, Mood, View } from './types';
 import { dayKey, formatDay, formatTime, greeting, initials, relative, uid } from './utils';
-import { buildHealthReport, emailHealthReport } from './report';
 
 const helpOptions: Array<{ value: HelpCategory; label: string }> = [
   { value: 'unwell', label: 'I feel unwell' },
@@ -34,7 +36,39 @@ export default function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [consentOpen, setConsentOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [authReady, setAuthReady] = useState(!firebaseEnabled);
   const proactiveRef = useRef(false);
+  const saveTimer = useRef<number | null>(null);
+  const loadedCloudFor = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!firebaseEnabled) return;
+    return watchAuth(async (user) => {
+      if (!user) {
+        loadedCloudFor.current = null;
+        update((c) => ({ ...c, account: undefined }));
+        setAuthReady(true);
+        return;
+      }
+      update((c) => ({ ...c, account: { uid: user.uid, email: user.email, name: user.name, provider: user.provider, signedInAt: new Date().toISOString() }, settings: { ...c.settings, displayName: user.name || c.settings.displayName || c.account?.name || 'Friend' } }));
+      if (loadedCloudFor.current !== user.uid) {
+        loadedCloudFor.current = user.uid;
+        try {
+          const cloud = await loadCloudState(user.uid);
+          if (cloud) update((c) => ({ ...cloud, account: { uid: user.uid, email: user.email, name: user.name, provider: user.provider, signedInAt: new Date().toISOString() }, settings: { ...cloud.settings, ...c.settings, displayName: user.name || cloud.settings.displayName || c.settings.displayName } }));
+        } catch { /* keep local */ }
+      }
+      setAuthReady(true);
+    });
+  }, [update]);
+
+  useEffect(() => {
+    if (!firebaseEnabled || !state.account?.uid) return;
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => { saveCloudState(state.account!.uid!, state).catch(() => {}); }, 1200);
+    return () => { if (saveTimer.current) window.clearTimeout(saveTimer.current); };
+  }, [state]);
+
   useEffect(() => { if (state.onboarded && !state.settings.consentGiven) setConsentOpen(true); }, [state.onboarded, state.settings.consentGiven]);
   useEffect(() => { if (!toast) return; const t = window.setTimeout(() => setToast(null), 2800); return () => window.clearTimeout(t); }, [toast]);
   useEffect(() => { document.documentElement.style.fontSize = state.settings.textScale === 'xlarge' ? '23px' : state.settings.textScale === 'large' ? '20px' : '17px'; document.body.classList.toggle('contrast', state.settings.highContrast); }, [state.settings.textScale, state.settings.highContrast]);
@@ -83,7 +117,7 @@ export default function App() {
         {state.onboarded && <nav className="segmented" aria-label="Views">{(['me', 'circle', 'settings'] as const).map((item) => <button key={item} aria-selected={view === item} onClick={() => setView(item)}>{item === 'me' ? 'My day' : item === 'circle' ? 'Circle' : 'Settings'}</button>)}</nav>}
       </header>
       <main id="main">
-        {!state.account ? <LoginView state={state} update={update} /> : !state.onboarded ? <Onboarding state={state} update={update} onDone={() => setConsentOpen(true)} /> : view === 'me' ? <MeView ctx={ctx} status={status} checkedInToday={checkedInToday} /> : view === 'circle' ? <CircleView ctx={ctx} status={status} /> : <SettingsView ctx={ctx} />}
+        {!authReady ? <section className="page"><div className="card"><h2 className="card-title">Loading Daylight</h2><p className="card-note">Getting your account ready...</p></div></section> : !state.account ? <LoginView state={state} update={update} /> : !state.onboarded ? <Onboarding state={state} update={update} onDone={() => setConsentOpen(true)} /> : view === 'me' ? <MeView ctx={ctx} status={status} checkedInToday={checkedInToday} /> : view === 'circle' ? <CircleView ctx={ctx} status={status} /> : <SettingsView ctx={ctx} />}
       </main>
       <footer className="footer">Daylight is a support tool, not a medical device or emergency service. In an emergency, call {state.settings.emergencyNumber || '999'}.</footer>
       {helpOpen && <HelpModal ctx={ctx} onClose={() => setHelpOpen(false)} />}
@@ -95,27 +129,66 @@ export default function App() {
 
 function LoginView({ state, update }: { state: AppState; update: (fn: (s: AppState) => AppState) => void }) {
   const [email, setEmail] = useState(state.account?.email ?? '');
+  const [password, setPassword] = useState('');
   const [name, setName] = useState(state.settings.displayName === 'Alex' ? '' : state.settings.displayName);
-  const signInEmail = () => {
-    const value = email.trim().toLowerCase();
-    if (!value || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return;
-    update((c) => ({ ...c, account: { email: value, name: name.trim() || undefined, provider: 'email', signedInAt: new Date().toISOString() }, settings: { ...c.settings, displayName: name.trim() || c.settings.displayName } }));
+  const [mode, setMode] = useState<'signin' | 'signup'>('signin');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const applyLocal = (provider: 'email' | 'google', value: string) => {
+    update((c) => ({ ...c, account: { email: value, name: name.trim() || undefined, provider, signedInAt: new Date().toISOString() }, settings: { ...c.settings, displayName: name.trim() || c.settings.displayName } }));
   };
-  const signInGoogle = () => {
-    // Best simple path: Google Identity setup can replace this with real OAuth token flow.
+
+  const onEmail = async () => {
     const value = email.trim().toLowerCase();
-    if (value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-      update((c) => ({ ...c, account: { email: value, name: name.trim() || undefined, provider: 'google', signedInAt: new Date().toISOString() }, settings: { ...c.settings, displayName: name.trim() || c.settings.displayName } }));
+    if (!value || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) { setError('Enter a valid email address.'); return; }
+    setError(null);
+    if (!firebaseEnabled) { applyLocal('email', value); return; }
+    if (password.length < 6) { setError('Password must be at least 6 characters.'); return; }
+    setBusy(true);
+    try {
+      if (mode === 'signup') await emailSignUp(value, password, name.trim() || undefined);
+      else await emailSignIn(value, password);
+    } catch (e: any) {
+      setError(e?.message?.replace('Firebase: ', '') || 'Could not sign in.');
+    } finally { setBusy(false); }
+  };
+
+  const onGoogle = async () => {
+    setError(null);
+    if (!firebaseEnabled) {
+      const value = email.trim().toLowerCase();
+      if (value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) { applyLocal('google', value); return; }
+      setError('Google sign-in is not available right now. Please use email sign-in.');
       return;
     }
-    alert('To use Google sign-in fully, connect Google Identity in app setup. For now, enter your Gmail address and continue.');
+    setBusy(true);
+    try { await googleSignIn(); } catch (e: any) { setError(e?.message?.replace('Firebase: ', '') || 'Could not sign in with Google.'); } finally { setBusy(false); }
   };
-  return <section className="page"><div className="page-head"><h1 className="page-title">Welcome to Daylight</h1><p className="page-sub">Sign in so your health report can be emailed when you request it.</p></div>
-    <div className="card"><h2 className="card-title">Sign in</h2><p className="card-note">Simple and safe. You can use email now. Google sign-in can be fully connected in setup.</p>
+
+  const onReset = async () => {
+    const value = email.trim().toLowerCase();
+    if (!firebaseEnabled) { setError('Password reset is not available right now.'); return; }
+    if (!value) { setError('Enter your email first.'); return; }
+    setBusy(true);
+    try { await resetPassword(value); setError('Password reset email sent. Check your inbox.'); } catch (e: any) { setError(e?.message?.replace('Firebase: ', '') || 'Could not send reset email.'); } finally { setBusy(false); }
+  };
+
+  return <section className="page"><div className="page-head"><h1 className="page-title">Welcome to Daylight</h1><p className="page-sub">Sign in to keep your information safe and get your health report by email when you need it.</p></div>
+    <div className="card"><h2 className="card-title">{mode === 'signup' ? 'Create account' : 'Sign in'}</h2><p className="card-note">Simple and safe.</p>
       <div className="field"><label htmlFor="login-name">Your name</label><input id="login-name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" /></div>
       <div className="field"><label htmlFor="login-email">Email address</label><input id="login-email" value={email} onChange={(e) => setEmail(e.target.value)} inputMode="email" autoComplete="email" placeholder="you@example.com" /></div>
-      <div className="actions"><button className="btn btn-primary" onClick={signInEmail}>Continue with email</button><button className="btn" onClick={signInGoogle}>Continue with Google</button></div>
-      <p className="field-hint" style={{ marginTop: 12 }}>We skipped Apple sign-in to keep setup simple. For full Google/automatic account login across devices, connect Firebase/Supabase Auth later.</p>
+      {firebaseEnabled && <div className="field"><label htmlFor="login-password">Password</label><input id="login-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} placeholder="At least 6 characters" /></div>}
+      {error && <p className="field-hint" role="status" style={{ color: 'var(--red, #b33)' }}>{error}</p>}
+      <div className="actions">
+        <button className="btn btn-primary" disabled={busy} onClick={onEmail}>{busy ? 'Please wait...' : mode === 'signup' ? 'Create account' : 'Sign in with email'}</button>
+        <button className="btn" disabled={busy} onClick={onGoogle}>Continue with Google</button>
+      </div>
+      <div className="actions" style={{ marginTop: 10 }}>
+        <button className="btn btn-ghost" onClick={() => setMode(mode === 'signup' ? 'signin' : 'signup')}>{mode === 'signup' ? 'I already have an account' : 'Create an account'}</button>
+        {firebaseEnabled && <button className="btn btn-ghost" onClick={onReset}>Forgot password</button>}
+      </div>
+
     </div></section>;
 }
 
@@ -238,13 +311,14 @@ function SettingsView({ ctx }: { ctx: AppContext }) {
       <div className="actions" style={{ marginTop: 12 }}><button className="btn" onClick={() => update((c) => ({ ...c, contacts: [...c.contacts, { id: uid(), name: 'New person', relationship: 'Trusted person', notify: true }] }))}>Add person</button></div>
       <div className="toggle-row" style={{ marginTop: 14 }}><div><strong>Share with circle</strong><small>Allow your circle to see check-ins and health notes</small></div><button className="switch" role="switch" aria-checked={state.settings.shareWithCircle} onClick={() => set({ shareWithCircle: !state.settings.shareWithCircle })}><span className="sr-only">Toggle sharing</span></button></div>
     </div>
-    <div className="card"><h2 className="card-title">Account & health report</h2><p className="card-note">Signed in as {state.account?.email || 'no email yet'}. You can email a health report when you request it.</p>
-      <div className="field"><label htmlFor="account-email">Account email</label><input id="account-email" value={state.account?.email || ''} onChange={(e) => update((c) => ({ ...c, account: { email: e.target.value.trim().toLowerCase(), name: c.account?.name || c.settings.displayName, provider: c.account?.provider || 'email', signedInAt: c.account?.signedInAt || new Date().toISOString() } }))} inputMode="email" autoComplete="email" /></div>
+    <div className="card"><h2 className="card-title">Account & health report</h2><p className="card-note">Signed in as {state.account?.email || 'no email yet'}{state.account?.provider ? ` (${state.account.provider})` : ''}. You can email a health report when you request it.</p>
+      <div className="field"><label htmlFor="account-email">Account email</label><input id="account-email" value={state.account?.email || ''} onChange={(e) => update((c) => ({ ...c, account: { ...c.account, email: e.target.value.trim().toLowerCase(), name: c.account?.name || c.settings.displayName, provider: c.account?.provider || 'email', signedInAt: c.account?.signedInAt || new Date().toISOString() } }))} inputMode="email" autoComplete="email" /></div>
       <div className="demo-grid">
-        <button className="btn btn-primary" onClick={async () => { await emailHealthReport(state); toast('Health report ready to send.'); }}>Email health report</button>
+        <button className="btn btn-primary" onClick={async () => { const result = await emailHealthReport(state); toast(result.method === 'email' ? 'Health report sent to your email.' : 'Health report ready to send.'); }}>Email health report</button>
         <button className="btn" onClick={async () => { const report = buildHealthReport(state); try { await navigator.clipboard.writeText(report); toast('Health report copied.'); } catch { toast('Could not copy report.'); } }}>Copy health report</button>
-        <button className="btn" onClick={() => { update((c) => ({ ...c, account: undefined })); toast('Signed out.'); }}>Sign out</button>
+        <button className="btn" onClick={async () => { await logOut().catch(() => {}); update((c) => ({ ...c, account: undefined })); toast('Signed out.'); }}>Sign out</button>
       </div>
+
     </div>
     <div className="card"><h2 className="card-title">Data & actions</h2><p className="card-note">Your check-ins, health notes, and messages are stored on this device. You can export them for your records or care team.</p><div className="demo-grid">
       <button className="btn" onClick={() => { const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `daylight-data-${dayKey()}.json`; a.click(); URL.revokeObjectURL(a.href); toast('Data exported.'); }}>Export my data</button>

@@ -62,6 +62,7 @@ export interface EventItem {
 export type TextScale = 'normal' | 'large' | 'xlarge';
 
 export interface Account {
+  uid?: string;
   email: string;
   name?: string;
   provider: 'email' | 'google';

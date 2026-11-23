@@ -1,6 +1,7 @@
 import type { AppState } from './types';
 import { formatDay, formatTime } from './utils';
 import { helpLabels } from './status';
+import { auth } from './firebase';
 
 export function buildHealthReport(state: AppState) {
   const now = new Date();
@@ -32,8 +33,23 @@ export async function emailHealthReport(state: AppState) {
   const report = buildHealthReport(state);
   const subject = `Daylight health report - ${state.settings.displayName || 'User'} - ${new Date().toLocaleDateString()}`;
   const to = state.account?.email || '';
-  const mailto = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(report)}`;
+  const endpoint = (import.meta.env.VITE_REPORT_EMAIL_ENDPOINT as string | undefined)?.trim();
 
+  if (endpoint && to) {
+    try {
+      const token = auth?.currentUser ? await auth.currentUser.getIdToken() : undefined;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ to, subject, report, name: state.settings.displayName || 'Daylight user' }),
+      });
+      if (res.ok) return { ok: true, method: 'email' as const };
+    } catch {
+      // fall through to device share/mail
+    }
+  }
+
+  const mailto = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(report)}`;
   if (typeof navigator !== 'undefined' && (navigator as any).share) {
     try {
       await (navigator as any).share({ title: subject, text: report });

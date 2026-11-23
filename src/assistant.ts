@@ -63,25 +63,30 @@ function buildSystemPrompt(state: AppState) {
   const recentHealth = state.healthEntries.slice(0, 5).map((e) => `- ${e.at}: ${e.summary}`).join('\n') || '- none yet';
   const lastCheckIn = state.checkIns[0]?.at || 'never';
   const openHelp = state.helpRequests.filter((r) => r.status !== 'resolved').map((r) => r.category).join(', ') || 'none';
-  return `You are Daylight, a warm, calm, dignified AI companion for an adult who may be older or living with health conditions. 
-Goals: have a natural conversation, ask gentle follow-up questions, notice wellbeing changes, and record health status the user reports.
+  return `You are Daylight, a warm, smart, calm voice companion for an adult who may be older, disabled, or living with health conditions.
+Goals: have natural spoken conversation, keep them safe and active, ask gentle follow-up questions, notice wellbeing changes, and help with practical tasks.
+Abilities you can trigger by including exact action tags at the end of your reply when appropriate:
+- [ACTION:CALL:<contact name or phone>] to call someone
+- [ACTION:SMS:<contact name or "all">::<message>] to send a text message
+- [ACTION:HELP] to open help
+Only use action tags when the user clearly asks or clearly needs it. Never invent phone numbers.
 Safety rules (must follow):
 - You are NOT a doctor or emergency service. Never diagnose, prescribe, or change medication doses.
-- If the user reports urgent symptoms (chest pain, trouble breathing, stroke signs, severe bleeding, suicidal thoughts, severe sudden pain), clearly tell them to call ${state.settings.emergencyNumber || '999'} now and use the I need help button.
-- Be clear, short, respectful, and never patronising.
-- Ask one question at a time. Prefer plain language.
+- If urgent symptoms (chest pain, trouble breathing, stroke signs, severe bleeding, suicidal thoughts, severe sudden pain), tell them to call ${state.settings.emergencyNumber || '999'} now and include [ACTION:HELP].
+- Be clear, short, respectful, never patronising. Ask one question at a time.
+- Do not say "I recorded" or "I logged". Just respond naturally and supportively.
 User context:
 - Name: ${name}
 - Health conditions: ${conditions}
 - Last check-in: ${lastCheckIn}
 - Open help requests: ${openHelp}
 - Recent health notes:\n${recentHealth}
-When you learn health info, naturally reflect it back. Keep replies under 120 words.`;
+Keep replies under 90 words for voice.`;
 }
 
 async function callRemoteAI(state: AppState, prompt: string): Promise<string | null> {
   const envKey = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim() || '';
-  const envModel = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-1.5-flash';
+  const envModel = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-2.5-flash';
   if (!state.settings.aiEnabled || !envKey) return null;
 
   const recent = state.messages.slice(-12).map((m) => ({
@@ -104,17 +109,36 @@ async function callRemoteAI(state: AppState, prompt: string): Promise<string | n
   return data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('').trim() || null;
 }
 
-export async function generateAssistantReply(input: string, state: AppState): Promise<{ text: string; health?: Partial<HealthEntry> }> {
+export function parseAssistantActions(text: string) {
+  const actions: Array<{ type: 'call' | 'sms' | 'help'; target?: string; message?: string }> = [];
+  let clean = text;
+  const actionRe = /\[ACTION:(CALL|SMS|HELP)(?::([^\]\:]+))?(?:::(.+?))?\]/gi;
+  let m: RegExpExecArray | null;
+  while ((m = actionRe.exec(text))) {
+    const type = m[1].toLowerCase() as 'call' | 'sms' | 'help';
+    actions.push({ type, target: m[2]?.trim(), message: m[3]?.trim() });
+  }
+  clean = clean.replace(actionRe, '').replace(/\s{2,}/g, ' ').trim();
+  return { clean, actions };
+}
+
+export async function generateAssistantReply(input: string, state: AppState): Promise<{ text: string; health?: Partial<HealthEntry>; actions: Array<{ type: 'call' | 'sms' | 'help'; target?: string; message?: string }> }> {
   const health = extractHealth(input);
-  if (urgentPattern.test(input)) return localAssistantReply(input, state);
+  if (urgentPattern.test(input)) {
+    const local = localAssistantReply(input, state);
+    return { text: local.text, health: local.health ?? undefined, actions: [{ type: 'help' }] };
+  }
   try {
     const text = await callRemoteAI(state, input);
-    if (text) return { text, health: health ?? undefined };
+    if (text) {
+      const { clean, actions } = parseAssistantActions(text);
+      return { text: clean || text, health: health ?? undefined, actions };
+    }
   } catch {
     // fall back to local
   }
   const local = localAssistantReply(input, state);
-  return { text: local.text, health: local.health ?? health ?? undefined };
+  return { text: local.text, health: local.health ?? health ?? undefined, actions: [] };
 }
 
 export async function generateProactiveMessage(state: AppState): Promise<string> {

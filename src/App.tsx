@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { generateAssistantReply, generateProactiveMessage } from './assistant';
+import { generateAssistantReply, generateProactiveMessage, parseAssistantActions } from './assistant';
+import { sendEmergencyText } from './notify';
 import { useAppState } from './store';
 import { deriveStatus, helpLabels } from './status';
 import type { AppContext, AppState, HelpCategory, Mood, View } from './types';
 import { dayKey, formatDay, formatTime, greeting, initials, relative, uid } from './utils';
-import { sendEmergencyText } from './notify';
 
 const helpOptions: Array<{ value: HelpCategory; label: string }> = [
   { value: 'unwell', label: 'I feel unwell' },
@@ -46,21 +46,23 @@ export default function App() {
       const lastMsg = state.messages[state.messages.length - 1];
       const lastAt = lastMsg ? new Date(lastMsg.at).getTime() : 0;
       const lastProactive = state.settings.lastProactiveAt ? new Date(state.settings.lastProactiveAt).getTime() : 0;
-      const quietMs = 45 * 60 * 1000;
+      const quietMs = 20 * 60 * 1000;
       const due = (!lastAt && now - lastProactive > quietMs) || (lastAt && now - Math.max(lastAt, lastProactive) > quietMs);
       const recentAssistant = lastMsg?.from === 'Daylight' && now - lastAt < quietMs;
       if (!due || recentAssistant) return;
       proactiveRef.current = true;
       try {
-        const text = await generateProactiveMessage(state);
+        const raw = await generateProactiveMessage(state);
+        const { clean, actions } = parseAssistantActions(raw);
         const at = new Date().toISOString();
         update((c) => ({
           ...c,
           settings: { ...c.settings, lastProactiveAt: at },
-          messages: [...c.messages, { id: uid(), at, from: 'Daylight', role: 'assistant' as const, text }].slice(-80),
+          messages: [...c.messages, { id: uid(), at, from: 'Daylight', role: 'assistant' as const, text: clean || raw }].slice(-80),
           events: [eventFor('system', 'Daylight sent a proactive check-in'), ...c.events].slice(0, 200),
         }));
-        if (state.settings.speakReplies) speak(text);
+        speak(clean || raw);
+        for (const a of actions) { if (a.type === 'help') setHelpOpen(true); if (a.type === 'sms') await sendEmergencyText(state, 'other', a.message || 'Checking in because it has been quiet.'); }
       } finally { proactiveRef.current = false; }
     };
     tick();
@@ -125,6 +127,19 @@ function AssistantCard({ ctx }: { ctx: AppContext }) {
   const logRef = useRef<HTMLDivElement | null>(null); const recRef = useRef<any>(null);
   useEffect(() => { logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: 'smooth' }); }, [state.messages.length, thinking]);
 
+  const runActions = async (actions: Array<{ type: 'call' | 'sms' | 'help'; target?: string; message?: string }>) => {
+    for (const a of actions) {
+      if (a.type === 'help') ctx.openHelp();
+      if (a.type === 'call') {
+        const target = state.contacts.find((c) => c.name.toLowerCase().includes((a.target || '').toLowerCase())) || state.contacts.find((c) => c.notify && c.phone);
+        if (target?.phone) window.location.href = `tel:${target.phone.replace(/\s+/g, '')}`;
+      }
+      if (a.type === 'sms') {
+        await sendEmergencyText(state, 'other', a.message || a.target || 'Please check in when you can.');
+      }
+    }
+  };
+
   const send = async (text: string) => {
     const content = text.trim(); if (!content || thinking) return;
     const at = new Date().toISOString(); const userMsg = { id: uid(), at, from: 'You', role: 'user' as const, text: content };
@@ -138,7 +153,8 @@ function AssistantCard({ ctx }: { ctx: AppContext }) {
         if (reply.health) { const entry = { id: uid(), at: new Date().toISOString(), source: 'chat' as const, summary: reply.health.summary || content.slice(0, 80), ...reply.health }; healthEntries.unshift(entry as any); events.unshift(eventFor('health', `Health note: ${entry.summary}`)); }
         return { ...c, messages: [...c.messages, botMsg].slice(-80), healthEntries: healthEntries.slice(0, 100), events: events.slice(0, 200) };
       });
-      if (state.settings.speakReplies) speak(reply.text);
+      speak(reply.text);
+      await runActions(reply.actions || []);
     } finally { setThinking(false); }
   };
 
@@ -153,7 +169,7 @@ function AssistantCard({ ctx }: { ctx: AppContext }) {
   };
 
   const quick = ['How am I doing today?', 'I feel a bit tired', 'I took my medication', 'Who can I call?'];
-  return <div className="card"><h2 className="card-title">Chat with Daylight</h2><p className="card-note">Daylight can chat with you by text or voice, check in proactively, and record health notes you report. It is not a medical service.</p>
+  return <div className="card"><h2 className="card-title">Chat with Daylight</h2><p className="card-note">Talk with Daylight by voice or text. It can check in on you, help you reach people, and help in an emergency.</p>
     <div className="assistant-log" ref={logRef} aria-live="polite">{state.messages.length === 0 && <div className="bubble bot">Hi {state.settings.displayName.split(' ')[0] || 'there'}. How are you feeling today?</div>}{state.messages.map((msg) => <div key={msg.id} className={`bubble ${msg.from === 'You' ? 'user' : 'bot'}`}>{msg.text}</div>)}{thinking && <div className="bubble bot">Daylight is thinking...</div>}</div>
     <div className="chips" aria-label="Suggested messages">{quick.map((q) => <button key={q} className="chip" onClick={() => send(q)}>{q}</button>)}</div>
     <div className="ask-row"><input className="ask-input" aria-label="Message Daylight" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') send(draft); }} placeholder="Type or use voice..." /><button className="btn" onClick={toggleVoice} aria-pressed={listening}>{listening ? 'Listening…' : '🎤 Voice'}</button><button className="ask-send" onClick={() => send(draft)} disabled={thinking}>{thinking ? '...' : 'Send'}</button></div>
@@ -187,9 +203,8 @@ function SettingsView({ ctx }: { ctx: AppContext }) {
       <div className="field"><label htmlFor="conditions">Health conditions (comma separated)</label><input id="conditions" value={state.settings.healthConditions.join(', ')} onChange={(e) => set({ healthConditions: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) })} /><div className="field-hint">Used to make check-ins more relevant. Not a diagnosis.</div></div>
       <div className="field"><label htmlFor="emergency">Emergency number</label><input id="emergency" value={state.settings.emergencyNumber} onChange={(e) => set({ emergencyNumber: e.target.value })} inputMode="tel" /></div>
     </div>
-    <div className="card"><h2 className="card-title">Companion support</h2><p className="card-note">Daylight can check in, chat, listen by voice, and speak replies aloud. It is a support companion, not a doctor or emergency service.</p>
-      <div className="toggle-row"><div><strong>Automatic check-ins</strong><small>Daylight messages you if it has been quiet for a while</small></div><button className="switch" role="switch" aria-checked={state.settings.proactiveChat} onClick={() => set({ proactiveChat: !state.settings.proactiveChat })}><span className="sr-only">Toggle proactive chat</span></button></div>
-      <div className="toggle-row"><div><strong>Read replies aloud</strong><small>Speak Daylight's replies at a normal voice</small></div><button className="switch" role="switch" aria-checked={state.settings.speakReplies} onClick={() => set({ speakReplies: !state.settings.speakReplies })}><span className="sr-only">Toggle spoken replies</span></button></div>
+    <div className="card"><h2 className="card-title">Companion support</h2><p className="card-note">Daylight checks in, talks by voice, and can help you reach your trusted people. It is a support companion, not a doctor or emergency service.</p>
+      <div className="toggle-row"><div><strong>Automatic check-ins</strong><small>Daylight speaks up if things are quiet for around 20 minutes</small></div><button className="switch" role="switch" aria-checked={state.settings.proactiveChat} onClick={() => set({ proactiveChat: !state.settings.proactiveChat })}><span className="sr-only">Toggle proactive chat</span></button></div>
     </div>
     <div className="card"><h2 className="card-title">Trusted circle</h2><p className="card-note">People who can be notified. Emergency text uses your device's SMS/share with their phone numbers and optional location.</p>
       {state.contacts.map((contact, idx) => <div key={contact.id} className="editor-row"><div className="field" style={{ marginBottom: 0 }}><label>Name</label><input value={contact.name} onChange={(e) => update((c) => ({ ...c, contacts: c.contacts.map((x, i) => i === idx ? { ...x, name: e.target.value } : x) }))} /></div><div className="field" style={{ marginBottom: 0 }}><label>Phone</label><input value={contact.phone ?? ''} onChange={(e) => update((c) => ({ ...c, contacts: c.contacts.map((x, i) => i === idx ? { ...x, phone: e.target.value } : x) }))} /></div><button className="btn" onClick={() => update((c) => ({ ...c, contacts: c.contacts.filter((_, i) => i !== idx) }))}>Remove</button></div>)}

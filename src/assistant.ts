@@ -80,38 +80,28 @@ When you learn health info, naturally reflect it back. Keep replies under 120 wo
 }
 
 async function callRemoteAI(state: AppState, prompt: string): Promise<string | null> {
-  const s = state.settings;
-  if (!s.aiEnabled || !s.aiApiKey.trim()) return null;
-  const recent = state.messages.slice(-12).map((m) => ({ role: m.role === 'assistant' || m.from === 'Daylight' ? 'assistant' : 'user', content: m.text }));
+  const envKey = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim() || '';
+  const envModel = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-1.5-flash';
+  if (!state.settings.aiEnabled || !envKey) return null;
 
-  if (s.aiMode === 'gemini') {
-    const model = s.aiModel || 'gemini-1.5-flash';
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(s.aiApiKey.trim())}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: buildSystemPrompt(state) }] },
-        contents: [...recent.map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })), { role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.4, maxOutputTokens: 300 },
-      }),
-    });
-    if (!res.ok) throw new Error(`AI ${res.status}`);
-    const data = await res.json();
-    return data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('').trim() || null;
-  }
+  const recent = state.messages.slice(-12).map((m) => ({
+    role: m.role === 'assistant' || m.from === 'Daylight' ? 'model' : 'user',
+    parts: [{ text: m.text }],
+  }));
 
-  if (s.aiMode === 'openai' && s.aiEndpoint.trim()) {
-    const res = await fetch(s.aiEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.aiApiKey.trim()}` },
-      body: JSON.stringify({ model: s.aiModel || 'gpt-4o-mini', temperature: 0.4, messages: [{ role: 'system', content: buildSystemPrompt(state) }, ...recent, { role: 'user', content: prompt }] }),
-    });
-    if (!res.ok) throw new Error(`AI ${res.status}`);
-    const data = await res.json();
-    return data?.choices?.[0]?.message?.content?.trim() || null;
-  }
-  return null;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(envModel)}:generateContent?key=${encodeURIComponent(envKey)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: buildSystemPrompt(state) }] },
+      contents: [...recent, { role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.4, maxOutputTokens: 300 },
+    }),
+  });
+  if (!res.ok) throw new Error(`AI ${res.status}`);
+  const data = await res.json();
+  return data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('').trim() || null;
 }
 
 export async function generateAssistantReply(input: string, state: AppState): Promise<{ text: string; health?: Partial<HealthEntry> }> {

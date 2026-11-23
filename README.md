@@ -11,7 +11,7 @@ A simple, dignified daily check-in for adults living independently or with healt
 
 - **I'm OK today** - one big check-in button, optional mood.
 - **I need help / Send emergency text** - records the request and prepares an SMS/share alert to trusted contacts with reason, message, and optional location (device-dependent).
-- **AI companion (text + voice)** - Daylight chats by text or microphone, can send proactive check-ins, and records health notes the user reports. Optional OpenAI-compatible mode for smarter replies (API key stored locally in browser settings; production should use a backend proxy).
+- **Built-in companion (text + voice)** - Daylight chats by text or microphone, sends proactive check-ins, speaks replies aloud at a normal rate/pitch, and records health notes the user reports. No AI setup is shown to users.
 - **Trusted circle dashboard** - green/amber/red status, help requests, recent health notes, activity.
 - **Accessibility** - large/extra-large text, high contrast, simple view, big tap targets, screen-reader labels, voice input, optional spoken replies.
 - **Real local data** - check-ins, messages, health notes, contacts, and settings are stored on-device in localStorage. Users can export or delete their data from Settings.
@@ -38,8 +38,8 @@ Workflow: `.github/workflows/deploy.yml`. In repo settings, set **Pages → Sour
 
 ## Important safety / production notes
 
-- Daylight **does not diagnose**, prescribe, or provide emergency care.
+- Daylight **does not diagnose**, prescribe, or provide emergency care. It is a support companion, not an AI doctor.
 - Emergency texting currently uses device capabilities (`sms:` / Web Share / clipboard fallback). For reliable delivery, add a backend SMS provider (Twilio, etc.) with consent, audit logs, and retries.
-- The OpenAI-compatible mode stores API keys in browser localStorage for prototype use. **Do not use this for production**; use a secure server-side proxy.
+- **Gemini key security**: do not put API keys in the frontend for production. Configure `VITE_GEMINI_API_KEY` as a GitHub Actions secret for deployment builds, and preferably move AI calls behind a secure backend proxy. The value you shared should be treated as exposed and rotated.
 - For real multi-person/shared-circle use, add authentication, encrypted backend storage, roles/permissions, and audit trails.
 - Before real deployment: clinical/safeguarding review, GDPR/DPIA, accessibility audit (WCAG), and clear emergency escalation policy.
